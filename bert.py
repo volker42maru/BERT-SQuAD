@@ -7,7 +7,10 @@ import math
 import numpy as np
 import torch
 from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
-                                  BertForQuestionAnswering, BertTokenizer)
+                                  BertForQuestionAnswering, BertTokenizer,
+                                  DistilBertConfig,
+                                  DistilBertForQuestionAnswering,
+                                  DistilBertTokenizer)
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 
 from utils import (get_answer, input_to_squad_example,
@@ -25,8 +28,8 @@ class QA:
         self.doc_stride = 128
         self.do_lower_case = True
         self.max_query_length = 64
-        self.n_best_size = 20
-        self.max_answer_length = 30
+        self.n_best_size = 3
+        self.max_answer_length = 50
         self.model, self.tokenizer = self.load_model(model_path)
         if torch.cuda.is_available():
             self.device = 'cuda'
@@ -37,9 +40,9 @@ class QA:
 
 
     def load_model(self,model_path: str,do_lower_case=False):
-        config = BertConfig.from_pretrained(model_path + "/bert_config.json")
-        tokenizer = BertTokenizer.from_pretrained(model_path, do_lower_case=do_lower_case)
-        model = BertForQuestionAnswering.from_pretrained(model_path, from_tf=False, config=config)
+        config = DistilBertConfig.from_pretrained(model_path + "/bert_config.json")
+        tokenizer = DistilBertTokenizer.from_pretrained(model_path, do_lower_case=do_lower_case)
+        model = DistilBertForQuestionAnswering.from_pretrained(model_path, from_tf=False, config=config)
         return model, tokenizer
     
     def predict(self,passage :str,question :str):
@@ -59,7 +62,7 @@ class QA:
             with torch.no_grad():
                 inputs = {'input_ids':      batch[0],
                         'attention_mask': batch[1],
-                        'token_type_ids': batch[2]  
+                        # 'token_type_ids': batch[2]
                         }
                 example_indices = batch[3]
                 outputs = self.model(**inputs)

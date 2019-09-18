@@ -6,7 +6,7 @@ from bert import QA
 app = Flask(__name__)
 CORS(app)
 
-model = QA("model")
+model = QA("/home/volker/workspace/data/distilbert")
 
 @app.route("/predict",methods=['POST'])
 def predict():
@@ -20,4 +20,4 @@ def predict():
         return jsonify({"result":"Model Failed"})
 
 if __name__ == "__main__":
-    app.run('0.0.0.0',port=8000)
+    app.run('0.0.0.0',port=4245)
