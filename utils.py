@@ -74,44 +74,45 @@ class InputFeatures(object):
         self.start_position = start_position
         self.end_position = end_position
 
-def input_to_squad_example(passage, question):
+def input_to_squad_example(passages, question):
     """Convert input passage and question into a SquadExample."""
-
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
             return True
         return False
-
-    paragraph_text = passage
-    doc_tokens = []
-    char_to_word_offset = []
-    prev_is_whitespace = True
-    for c in paragraph_text:
-        if is_whitespace(c):
-            prev_is_whitespace = True
-        else:
-            if prev_is_whitespace:
-                doc_tokens.append(c)
+    examples = []
+    for passage in passages:
+        paragraph_text = passage
+        doc_tokens = []
+        char_to_word_offset = []
+        prev_is_whitespace = True
+        for c in paragraph_text:
+            if is_whitespace(c):
+                prev_is_whitespace = True
             else:
-                doc_tokens[-1] += c
-            prev_is_whitespace = False
-        char_to_word_offset.append(len(doc_tokens) - 1)
+                if prev_is_whitespace:
+                    doc_tokens.append(c)
+                else:
+                    doc_tokens[-1] += c
+                prev_is_whitespace = False
+            char_to_word_offset.append(len(doc_tokens) - 1)
 
-    qas_id = 0
-    question_text = question
-    start_position = None
-    end_position = None
-    orig_answer_text = None
+        qas_id = 0
+        question_text = question
+        start_position = None
+        end_position = None
+        orig_answer_text = None
 
-    example = SquadExample(
-        qas_id=qas_id,
-        question_text=question_text,
-        doc_tokens=doc_tokens,
-        orig_answer_text=orig_answer_text,
-        start_position=start_position,
-        end_position=end_position)
-                
-    return example
+        example = SquadExample(
+            qas_id=qas_id,
+            question_text=question_text,
+            doc_tokens=doc_tokens,
+            orig_answer_text=orig_answer_text,
+            start_position=start_position,
+            end_position=end_position)
+
+        examples.append(example)
+    return examples
 
 def _check_is_max_context(doc_spans, cur_span_index, position):
     """Check if this is the 'max context' doc span for the token."""
@@ -149,7 +150,7 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
 
     return cur_span_index == best_span_index
 
-def squad_examples_to_features(example, tokenizer, max_seq_length,
+def squad_examples_to_features(examples, tokenizer, max_seq_length,
                                  doc_stride, max_query_length,cls_token_at_end=False,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
                                  sequence_a_segment_id=0, sequence_b_segment_id=1,
@@ -165,122 +166,146 @@ def squad_examples_to_features(example, tokenizer, max_seq_length,
     features = []
     # if example_index % 100 == 0:
     #     logger.info('Converting %s/%s pos %s neg %s', example_index, len(examples), cnt_pos, cnt_neg)
+    query_tokens_batch = []
+    tok_to_orig_index_batch = []
+    orig_to_tok_index_batch = []
+    all_doc_tokens_batch = []
+    min_tokens_for_doc_batch = []
+    for (example_index, example) in enumerate(examples):
 
-    query_tokens = tokenizer.tokenize(example.question_text)
+        query_tokens = tokenizer.tokenize(example.question_text)
 
-    if len(query_tokens) > max_query_length:
-        query_tokens = query_tokens[0:max_query_length]
+        if len(query_tokens) > max_query_length:
+            query_tokens = query_tokens[0:max_query_length]
 
-    tok_to_orig_index = []
-    orig_to_tok_index = []
-    all_doc_tokens = []
-    for (i, token) in enumerate(example.doc_tokens):
-        orig_to_tok_index.append(len(all_doc_tokens))
-        sub_tokens = tokenizer.tokenize(token)
-        for sub_token in sub_tokens:
-            tok_to_orig_index.append(i)
-            all_doc_tokens.append(sub_token)
+        query_tokens_batch.append(query_tokens)
+
+        tok_to_orig_index = []
+        orig_to_tok_index = []
+        all_doc_tokens = []
+        for (i, token) in enumerate(example.doc_tokens):
+            orig_to_tok_index.append(len(all_doc_tokens))
+            sub_tokens = tokenizer.tokenize(token)
+            for sub_token in sub_tokens:
+                tok_to_orig_index.append(i)
+                all_doc_tokens.append(sub_token)
+
+        min_tokens_for_doc = len(all_doc_tokens) + len(query_tokens) + 3
+        min_tokens_for_doc_batch.append(min_tokens_for_doc)
+        tok_to_orig_index_batch.append(tok_to_orig_index)
+        orig_to_tok_index_batch.append(orig_to_tok_index)
+        all_doc_tokens_batch.append(all_doc_tokens)
+
     if vsl:
-        max_seq_length = min(max_seq_length, len(all_doc_tokens) + len(query_tokens) + 3)
-    # The -3 accounts for [CLS], [SEP] and [SEP]
-    max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
+        max_seq_length = min(max(min_tokens_for_doc_batch), max_seq_length)
 
-    # We can have documents that are longer than the maximum sequence length.
-    # To deal with this we do a sliding window approach, where we take chunks
-    # of the up to our max length with a stride of `doc_stride`.
-    _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
-        "DocSpan", ["start", "length"])
-    doc_spans = []
-    start_offset = 0
-    while start_offset < len(all_doc_tokens):
-        length = len(all_doc_tokens) - start_offset
-        if length > max_tokens_for_doc:
-            length = max_tokens_for_doc
-        doc_spans.append(_DocSpan(start=start_offset, length=length))
-        if start_offset + length == len(all_doc_tokens):
-            break
-        start_offset += min(length, doc_stride)
+    for (example_index, example) in enumerate(examples):
+        query_tokens = query_tokens_batch[example_index]
+        tok_to_orig_index = tok_to_orig_index_batch[example_index]
+        orig_to_tok_index = orig_to_tok_index_batch[example_index]
+        all_doc_tokens = all_doc_tokens_batch[example_index]
+        # The -3 accounts for [CLS], [SEP] and [SEP]
+        max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
 
-    for (doc_span_index, doc_span) in enumerate(doc_spans):
-        tokens = []
-        token_to_orig_map = {}
-        token_is_max_context = {}
-        segment_ids = []
+        # We can have documents that are longer than the maximum sequence length.
+        # To deal with this we do a sliding window approach, where we take chunks
+        # of the up to our max length with a stride of `doc_stride`.
+        _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
+            "DocSpan", ["start", "length"])
+        doc_spans = []
+        start_offset = 0
+        while start_offset < len(all_doc_tokens):
+            length = len(all_doc_tokens) - start_offset
+            if length > max_tokens_for_doc:
+                length = max_tokens_for_doc
+            doc_spans.append(_DocSpan(start=start_offset, length=length))
+            if start_offset + length == len(all_doc_tokens):
+                break
+            start_offset += min(length, doc_stride)
 
-        # CLS token at the beginning
-        if not cls_token_at_end:
-            tokens.append(cls_token)
-            segment_ids.append(cls_token_segment_id)
+        for (doc_span_index, doc_span) in enumerate(doc_spans):
+            tokens = []
+            token_to_orig_map = {}
+            token_is_max_context = {}
+            segment_ids = []
 
-        # Query
-        for token in query_tokens:
-            tokens.append(token)
+            # CLS token at the beginning
+            if not cls_token_at_end:
+                tokens.append(cls_token)
+                segment_ids.append(cls_token_segment_id)
+
+            # Query
+            for token in query_tokens:
+                tokens.append(token)
+                segment_ids.append(sequence_a_segment_id)
+
+            # SEP token
+            tokens.append(sep_token)
             segment_ids.append(sequence_a_segment_id)
 
-        # SEP token
-        tokens.append(sep_token)
-        segment_ids.append(sequence_a_segment_id)
+            # Paragraph
+            for i in range(doc_span.length):
+                split_token_index = doc_span.start + i
+                token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
 
-        # Paragraph
-        for i in range(doc_span.length):
-            split_token_index = doc_span.start + i
-            token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
+                is_max_context = _check_is_max_context(doc_spans, doc_span_index,
+                                                        split_token_index)
+                token_is_max_context[len(tokens)] = is_max_context
+                tokens.append(all_doc_tokens[split_token_index])
+                segment_ids.append(sequence_b_segment_id)
+            paragraph_len = doc_span.length
 
-            is_max_context = _check_is_max_context(doc_spans, doc_span_index,
-                                                    split_token_index)
-            token_is_max_context[len(tokens)] = is_max_context
-            tokens.append(all_doc_tokens[split_token_index])
+            # SEP token
+            tokens.append(sep_token)
             segment_ids.append(sequence_b_segment_id)
-        paragraph_len = doc_span.length
 
-        # SEP token
-        tokens.append(sep_token)
-        segment_ids.append(sequence_b_segment_id)
+            # CLS token at the end
+            if cls_token_at_end:
+                tokens.append(cls_token)
+                segment_ids.append(cls_token_segment_id)
 
-        # CLS token at the end
-        if cls_token_at_end:
-            tokens.append(cls_token)
-            segment_ids.append(cls_token_segment_id)
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real
+            # tokens are attended to.
+            input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
 
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+            # Zero-pad up to the sequence length.
+            while len(input_ids) < max_seq_length:
+                input_ids.append(pad_token)
+                input_mask.append(0 if mask_padding_with_zero else 1)
+                segment_ids.append(pad_token_segment_id)
 
-        # Zero-pad up to the sequence length.
-        while len(input_ids) < max_seq_length:
-            input_ids.append(pad_token)
-            input_mask.append(0 if mask_padding_with_zero else 1)
-            segment_ids.append(pad_token_segment_id)
+            assert len(input_ids) == max_seq_length
+            assert len(input_mask) == max_seq_length
+            assert len(segment_ids) == max_seq_length
 
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
+            start_position = None
+            end_position = None
 
-        start_position = None
-        end_position = None
-
-        features.append(
-            InputFeatures(
-                unique_id=unique_id,
-                example_index=example_index,
-                doc_span_index=doc_span_index,
-                tokens=tokens,
-                token_to_orig_map=token_to_orig_map,
-                token_is_max_context=token_is_max_context,
-                input_ids=input_ids,
-                input_mask=input_mask,
-                segment_ids=segment_ids,
-                paragraph_len=paragraph_len,
-                start_position=start_position,
-                end_position=end_position))
-        unique_id += 1
+            features.append(
+                InputFeatures(
+                    unique_id=unique_id,
+                    example_index=example_index,
+                    doc_span_index=doc_span_index,
+                    tokens=tokens,
+                    token_to_orig_map=token_to_orig_map,
+                    token_is_max_context=token_is_max_context,
+                    input_ids=input_ids,
+                    input_mask=input_mask,
+                    segment_ids=segment_ids,
+                    paragraph_len=paragraph_len,
+                    start_position=start_position,
+                    end_position=end_position))
+            unique_id += 1
 
     return features
 
 def to_list(tensor):
-    return tensor.detach().cpu().tolist()
+    if isinstance(tensor, np.ndarray):
+        return tensor
+    else:
+        return tensor.detach().cpu().tolist()
 
 def _get_best_indexes(logits, n_best_size):
     """Get the n-best logits from a list."""
@@ -402,7 +427,7 @@ def _compute_softmax(scores):
         probs.append(score / total_sum)
     return probs
 
-def get_answer(example, features, all_results, n_best_size,
+def get_answer(examples, features, all_results, n_best_size,
                 max_answer_length, do_lower_case):
     example_index_to_features = collections.defaultdict(list)
     for feature in features:
@@ -412,104 +437,107 @@ def get_answer(example, features, all_results, n_best_size,
     for result in all_results:
         unique_id_to_result[result.unique_id] = result
     
-    _PrelimPrediction = collections.namedtuple( "PrelimPrediction",["feature_index", "start_index", "end_index", "start_logit", "end_logit"])
+    _PrelimPrediction = collections.namedtuple("PrelimPrediction",["feature_index", "start_index", "end_index", "start_logit", "end_logit"])
 
-    example_index = 0
-    features = example_index_to_features[example_index]
+    #example_index = 0
+    answers = []
+    for (example_index, example) in enumerate(examples):
+        features = example_index_to_features[example_index]
 
-    prelim_predictions = []
+        prelim_predictions = []
 
-    for (feature_index, feature) in enumerate(features):
-        result = unique_id_to_result[feature.unique_id]
-        start_indexes = _get_best_indexes(result.start_logits, n_best_size)
-        end_indexes = _get_best_indexes(result.end_logits, n_best_size)
-        for start_index in start_indexes:
-            for end_index in end_indexes:
-                # We could hypothetically create invalid predictions, e.g., predict
-                # that the start of the span is in the question. We throw out all
-                # invalid predictions.
-                if start_index >= len(feature.tokens):
+        for (feature_index, feature) in enumerate(features):
+            result = unique_id_to_result[feature.unique_id]
+            start_indexes = _get_best_indexes(result.start_logits, n_best_size)
+            end_indexes = _get_best_indexes(result.end_logits, n_best_size)
+            for start_index in start_indexes:
+                for end_index in end_indexes:
+                    # We could hypothetically create invalid predictions, e.g., predict
+                    # that the start of the span is in the question. We throw out all
+                    # invalid predictions.
+                    if start_index >= len(feature.tokens):
+                        continue
+                    if end_index >= len(feature.tokens):
+                        continue
+                    if start_index not in feature.token_to_orig_map:
+                        continue
+                    if end_index not in feature.token_to_orig_map:
+                        continue
+                    if not feature.token_is_max_context.get(start_index, False):
+                        continue
+                    if end_index < start_index:
+                        continue
+                    length = end_index - start_index + 1
+                    if length > max_answer_length:
+                        continue
+                    prelim_predictions.append(
+                        _PrelimPrediction(
+                            feature_index=feature_index,
+                            start_index=start_index,
+                            end_index=end_index,
+                            start_logit=result.start_logits[start_index],
+                            end_logit=result.end_logits[end_index]))
+        prelim_predictions = sorted(prelim_predictions,key=lambda x: (x.start_logit + x.end_logit),reverse=True)
+        _NbestPrediction = collections.namedtuple("NbestPrediction",
+                            ["text", "start_logit", "end_logit","start_index","end_index"])
+        seen_predictions = {}
+        nbest = []
+        for pred in prelim_predictions:
+            if len(nbest) >= n_best_size:
+                break
+            feature = features[pred.feature_index]
+            orig_doc_start = -1
+            orig_doc_end = -1
+            if pred.start_index > 0:  # this is a non-null prediction
+                tok_tokens = feature.tokens[pred.start_index:(pred.end_index + 1)]
+                orig_doc_start = feature.token_to_orig_map[pred.start_index]
+                orig_doc_end = feature.token_to_orig_map[pred.end_index]
+                orig_tokens = example.doc_tokens[orig_doc_start:(orig_doc_end + 1)]
+                tok_text = " ".join(tok_tokens)
+
+                # De-tokenize WordPieces that have been split off.
+                tok_text = tok_text.replace(" ##", "")
+                tok_text = tok_text.replace("##", "")
+
+                # Clean whitespace
+                tok_text = tok_text.strip()
+                tok_text = " ".join(tok_text.split())
+                orig_text = " ".join(orig_tokens)
+
+                final_text = get_final_text(tok_text, orig_text,do_lower_case)
+                if final_text in seen_predictions:
                     continue
-                if end_index >= len(feature.tokens):
-                    continue
-                if start_index not in feature.token_to_orig_map:
-                    continue
-                if end_index not in feature.token_to_orig_map:
-                    continue
-                if not feature.token_is_max_context.get(start_index, False):
-                    continue
-                if end_index < start_index:
-                    continue
-                length = end_index - start_index + 1
-                if length > max_answer_length:
-                    continue
-                prelim_predictions.append(
-                    _PrelimPrediction(
-                        feature_index=feature_index,
-                        start_index=start_index,
-                        end_index=end_index,
-                        start_logit=result.start_logits[start_index],
-                        end_logit=result.end_logits[end_index]))
-    prelim_predictions = sorted(prelim_predictions,key=lambda x: (x.start_logit + x.end_logit),reverse=True)
-    _NbestPrediction = collections.namedtuple("NbestPrediction",
-                        ["text", "start_logit", "end_logit","start_index","end_index"])
-    seen_predictions = {}
-    nbest = []
-    for pred in prelim_predictions:
-        if len(nbest) >= n_best_size:
-            break
-        feature = features[pred.feature_index]
-        orig_doc_start = -1
-        orig_doc_end = -1
-        if pred.start_index > 0:  # this is a non-null prediction
-            tok_tokens = feature.tokens[pred.start_index:(pred.end_index + 1)]
-            orig_doc_start = feature.token_to_orig_map[pred.start_index]
-            orig_doc_end = feature.token_to_orig_map[pred.end_index]
-            orig_tokens = example.doc_tokens[orig_doc_start:(orig_doc_end + 1)]
-            tok_text = " ".join(tok_tokens)
 
-            # De-tokenize WordPieces that have been split off.
-            tok_text = tok_text.replace(" ##", "")
-            tok_text = tok_text.replace("##", "")
+                seen_predictions[final_text] = True
+            else:
+                final_text = ""
+                seen_predictions[final_text] = True
 
-            # Clean whitespace
-            tok_text = tok_text.strip()
-            tok_text = " ".join(tok_text.split())
-            orig_text = " ".join(orig_tokens)
+            nbest.append(
+                _NbestPrediction(
+                    text=final_text,
+                    start_logit=pred.start_logit,
+                    end_logit=pred.end_logit,
+                    start_index=orig_doc_start,
+                    end_index=orig_doc_end))
 
-            final_text = get_final_text(tok_text, orig_text,do_lower_case)
-            if final_text in seen_predictions:
-                continue
+        if not nbest:
+            nbest.append(_NbestPrediction(text="empty", start_logit=0.0, end_logit=0.0,start_index=-1,
+                    end_index=-1))
 
-            seen_predictions[final_text] = True
-        else:
-            final_text = ""
-            seen_predictions[final_text] = True
+        assert len(nbest) >= 1
 
-        nbest.append(
-            _NbestPrediction(
-                text=final_text,
-                start_logit=pred.start_logit,
-                end_logit=pred.end_logit,
-                start_index=orig_doc_start,
-                end_index=orig_doc_end))
+        total_scores = []
+        for entry in nbest:
+            total_scores.append(entry.start_logit + entry.end_logit)
 
-    if not nbest:
-        nbest.append(_NbestPrediction(text="empty", start_logit=0.0, end_logit=0.0,start_index=-1,
-                end_index=-1))
+        probs = _compute_softmax(total_scores)
 
-    assert len(nbest) >= 1
-
-    total_scores = []
-    for entry in nbest:
-        total_scores.append(entry.start_logit + entry.end_logit)
-
-    probs = _compute_softmax(total_scores)
-    
-    answer = {"answer" : nbest[0].text,
-               "start" : nbest[0].start_index,
-               "end" : nbest[0].end_index,
-               "confidence" : probs[0],
-               "document" : example.doc_tokens
-             }
-    return answer
+        answer = {"answer" : nbest[0].text,
+                   "start" : nbest[0].start_index,
+                   "end" : nbest[0].end_index,
+                   "confidence" : probs[0],
+                   "document" : example.doc_tokens
+                 }
+        answers.append(answer)
+    return answers
