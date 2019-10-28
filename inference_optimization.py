@@ -2,6 +2,7 @@
 # import onnx_tensorrt.backend as backend
 import onnx
 import torch
+import os
 
 
 class OptimizedModel:
@@ -25,7 +26,7 @@ class OptimizedModel:
             network.mark_output(network.get_layer(network.num_layers - 1).get_output(0))
             return builder.build_cuda_engine(network)
 
-    def optimize(self, use_xla=False, use_fp16=False, use_trt=False, export_onnx=False, use_onnx_runtime=False, onnx_path=None):
+    def optimize(self, use_jit=False, use_fp16=False, use_trt=False, export_onnx=False, use_onnx_runtime=False, onnx_path=None):
         dummy_input = torch.ones([1,384], dtype=torch.long).to(self.device)
         if use_fp16:
             from pytorch_transformers import AdamW
@@ -38,14 +39,16 @@ class OptimizedModel:
             self.model, optimizer = amp.initialize(self.model, optimizer, opt_level='O2')
             # self.model = torch.quantization.quantize_dynamic(self.model, dtype=torch.float16)
             # self.model = self.model.half()
-        if use_xla:
+        if use_jit:
             # cannot use xla with trt
             with torch.jit.optimized_execution(False):
                 self.model = torch.jit.trace(self.model, (dummy_input, dummy_input, dummy_input), check_trace=True)
             # self.model = torch.jit.script(self.model)
-            # self.model.save('/home/volker/workspace/gitrepo/BERT-SQuAD/traced_model.pt')
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            traced_model_path = os.path.join(dir_path, 'traced_model{}.pt'.format('_fp16' if use_fp16 else ''))
+            self.model.save(traced_model_path)
         if export_onnx:
-            torch.onnx.export(self.model, (dummy_input, dummy_input, dummy_input), onnx_path, export_params=True,
+            torch.onnx.export(self.model, (dummy_input, dummy_input, dummy_input), onnx_path,
                               input_names=['input_ids', 'attention_mask', 'token_type_ids'],
                               output_names=['start_logits', 'end_logits'],
                               do_constant_folding=True,
@@ -55,11 +58,13 @@ class OptimizedModel:
                                             'attention_mask': {0: 'batch_size_attention_mask',
                                                           1: 'seq_len'},
                                             'token_type_ids': {0: 'batch_size_token_type_ids',
-                                                          1: 'seq_len'}},
-                              operator_export_type=torch.onnx.OperatorExportTypes.ONNX)
+                                                          1: 'seq_len'}})
         if use_onnx_runtime:
             import onnxruntime
+            # so = onnxruntime.SessionOptions()
+            # so.graph_optimization_level = onnxruntime.capi._pybind_state.GraphOptimizationLevel.ORT_ENABLE_ALL
             ort_session = onnxruntime.InferenceSession(onnx_path)
+            # ort_session.set_providers(['CUDAExecutionProvider'])
             # return onnx session instead of model
             return ort_session
         if use_trt:

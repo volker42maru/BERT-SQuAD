@@ -8,6 +8,7 @@ import torch
 from onnx_tf.backend import prepare
 import onnx
 import tensorflow as tf
+import onnx_tf
 
 app = Flask(__name__)
 CORS(app)
@@ -18,6 +19,7 @@ MODEL_PATH = "/home/volker/workspace/data/spanbert_base_squad2"
 # model = QA("/home/volker/workspace/data/spanbert_base_squad2")
 # model = QA("roberta-large")
 TF_PB_PATH = "/home/volker/workspace/data/bert/mrc_en_spanbert_base_run_squad/graph/model.graph"
+ONNX_TF_PB_PATH = "/home/volker/workspace/gitrepo/BERT-SQuAD/spanbert_qa.pb"
 
 
 @app.route("/predict",methods=['POST'])
@@ -35,20 +37,23 @@ def predict():
 
 
 def benchmark_inference():
-    vsl = False
+    vsl = True
     # test(export_onnx=True)
+    max_batch = 4
 
     # pytorch tests
-    test(xla=False, fp16=False, onnx_runtime=False, vsl=vsl)
-    test(xla=True, fp16=False, onnx_runtime=False, vsl=vsl)
-    test(xla=False, fp16=True, onnx_runtime=False, vsl=vsl)
-    test(xla=False, fp16=False, onnx_runtime=True, vsl=vsl)
+    test(use_jit=False, fp16=False, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
+    test(use_jit=True, fp16=False, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
+    test(use_jit=False, fp16=True, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
+    test(use_jit=True, fp16=True, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
+    test(use_jit=False, fp16=False, onnx_runtime=True, vsl=vsl, max_batch=max_batch)
 
     # tf tests
-    test(tf_onnx=True, vsl=vsl)
+    test(tf_onnx=True, vsl=vsl, max_batch=max_batch)
+    test(tf_version=True, vsl=vsl, max_batch=max_batch)
 
 
-def test(xla=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_onnx=False, vsl=False, num_predicts=300):
+def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_onnx=False, tf_version=False, vsl=False, max_batch=1, num_predicts=300):
     document1 = 'Two partially reusable launch systems were developed, the Space Shuttle and Falcon 9. ' \
                'The Space Shuttle was partially reusable: the orbiter (which included the Space Shuttle ' \
                'main engines and the Orbital Maneuvering System engines), and the two solid rocket boosters ' \
@@ -64,44 +69,79 @@ def test(xla=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_onnx=F
     question = 'How many partially reusable launch systems were developed?'
     # passages = [document1, document2, document3, document1, document2, document3, document1, document2, document3]
     # passages = [document1, document2, document3]
-    passages = [document1]
+    # passages = [document1]
 
-    if tf_onnx:
+    if tf_onnx or tf_version:
+        from multiprocessing import Pool
+
         # onnx_model = onnx.load(ONNX_PATH)
-        # tf_exp = prepare(onnx_model)  # prepare tf representation
-        # tf_exp.export_graph(TF_PB_PATH)  # export the model
+        # prepare tf representation
+        # tf_exp = onnx_tf.backend.prepare(onnx_model)
+        # export the model
+        # tf_exp.export_graph(TF_PB_PATH)
 
         onnx_pb_graph = tf.Graph()
         with onnx_pb_graph.as_default():
+            tf_pb_path = ONNX_TF_PB_PATH if tf_onnx else TF_PB_PATH
             onnx_pb_graph_def = tf.GraphDef()
-            with tf.gfile.GFile(TF_PB_PATH, 'rb') as fid:
+            with tf.gfile.GFile(tf_pb_path, 'rb') as fid:
                 serialized_graph = fid.read()
 
             onnx_pb_graph_def.ParseFromString(serialized_graph)
             tf.import_graph_def(onnx_pb_graph_def, name='')
 
             with tf.Session() as sess:
-                model = QA(MODEL_PATH, xla=xla, fp16=fp16, onnx=onnx_runtime, sess=sess, vsl=vsl)
+                # INFERENCE using session.run
+                model = QA(MODEL_PATH, use_jit=use_jit, fp16=fp16, onnx=onnx_runtime, sess=sess, vsl=vsl, tf_onnx=tf_onnx)
 
-                print('-- BENCHMARKING (passages={}): JIT={} | FP16={} | ONNX_RUNTIME={} | TF_VERSION={} | EXACT_VSL={} --'
-                      .format(len(passages), xla, fp16, onnx_runtime, tf_onnx, vsl))
+                print('-- BENCHMARKING: JIT={} | FP16={} | ONNX_RUNTIME={} | '
+                      'TF_ONNX_VERSION={} | TF_VERSION={} | EXACT_VSL={} --'
+                      .format(use_jit, fp16, onnx_runtime, tf_onnx, tf_version, vsl))
+                for passage_batch in range(max_batch):
+                    passage_batch = pow(3, passage_batch-1)
+                    if passage_batch < 1:
+                        passages = [document1]
+                    else:
+                        passages = []
+                        for i in range(passage_batch):
+                            passages.append(document1)
+                            passages.append(document2)
+                            passages.append(document3)
+
+                    time_taken, rps = measure_inference(model, passages, question, num_predicts)
+                    # print('Time taken for test: {} s'.format(time_taken))
+                    print('RPS: {}'.format(rps))
+
+                sess.close()
+
+            del model, sess
+    else:
+        model = QA(MODEL_PATH, use_jit=use_jit, fp16=fp16, onnx=onnx_runtime, export_onnx=export_onnx, vsl=vsl, onnx_path=ONNX_PATH)
+
+        if not export_onnx:
+            print('-- BENCHMARKING: JIT={} | FP16={} | ONNX_RUNTIME={} | '
+                  'TF_ONNX_VERSION={} | TF_VERSION={} | EXACT_VSL={} --'
+                  .format(use_jit, fp16, onnx_runtime, tf_onnx, tf_version, vsl))
+            for passage_batch in range(max_batch):
+                passage_batch = pow(3, passage_batch-1)
+                if passage_batch < 1:
+                    passages = [document1]
+                else:
+                    passages = []
+                    for i in range(passage_batch):
+                        passages.append(document1)
+                        passages.append(document2)
+                        passages.append(document3)
+
                 time_taken, rps = measure_inference(model, passages, question, num_predicts)
                 # print('Time taken for test: {} s'.format(time_taken))
                 print('RPS: {}'.format(rps))
-    else:
-        model = QA(MODEL_PATH, xla=xla, fp16=fp16, onnx=onnx_runtime, export_onnx=export_onnx, vsl=vsl, onnx_path=ONNX_PATH)
-
-        if not export_onnx:
-            print('-- BENCHMARKING (passages={}): JIT={} | FP16={} | ONNX_RUNTIME={} | TF_VERSION={} | EXACT_VSL={} --'
-                  .format(len(passages), xla, fp16, onnx_runtime, tf_onnx, vsl))
-            time_taken, rps = measure_inference(model, passages, question, num_predicts)
-            # print('Time taken for test: {} s'.format(time_taken))
-            print('RPS: {}'.format(rps))
         del model
         torch.cuda.empty_cache()
 
 
 def measure_inference(model, passages, question, num_predicts):
+    print('Num passages: {}'.format(len(passages)))
     start_time = time.time()
     for i in range(num_predicts):
         answer = model.predict(passages, question)
