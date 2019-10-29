@@ -37,23 +37,25 @@ def predict():
 
 
 def benchmark_inference():
-    vsl = True
+    vsl = 'exact'
     # test(export_onnx=True)
     max_batch = 4
+    min_batch = 0
 
     # pytorch tests
-    test(use_jit=False, fp16=False, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
-    test(use_jit=True, fp16=False, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
-    test(use_jit=False, fp16=True, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
-    test(use_jit=True, fp16=True, onnx_runtime=False, vsl=vsl, max_batch=max_batch)
-    test(use_jit=False, fp16=False, onnx_runtime=True, vsl=vsl, max_batch=max_batch)
+    test(use_jit=False, fp16=False, onnx_runtime=False, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(use_jit=True, fp16=False, onnx_runtime=False, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(use_jit=False, fp16=True, onnx_runtime=False, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(use_jit=True, fp16=True, onnx_runtime=False, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(use_jit=False, fp16=False, onnx_runtime=True, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
 
     # tf tests
-    test(tf_onnx=True, vsl=vsl, max_batch=max_batch)
-    test(tf_version=True, vsl=vsl, max_batch=max_batch)
+    test(tf_onnx=True, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(tf_version=True, vsl=vsl, min_batch=min_batch, max_batch=max_batch)
+    test(tf_version=True, use_jit=True, vsl='rounded', min_batch=min_batch, max_batch=max_batch)
 
 
-def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_onnx=False, tf_version=False, vsl=False, max_batch=1, num_predicts=300):
+def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_onnx=False, tf_version=False, vsl='none', min_batch=0, max_batch=1, num_predicts=300):
     document1 = 'Two partially reusable launch systems were developed, the Space Shuttle and Falcon 9. ' \
                'The Space Shuttle was partially reusable: the orbiter (which included the Space Shuttle ' \
                'main engines and the Orbital Maneuvering System engines), and the two solid rocket boosters ' \
@@ -74,11 +76,13 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
     if tf_onnx or tf_version:
         from multiprocessing import Pool
 
-        # onnx_model = onnx.load(ONNX_PATH)
-        # prepare tf representation
-        # tf_exp = onnx_tf.backend.prepare(onnx_model)
-        # export the model
-        # tf_exp.export_graph(TF_PB_PATH)
+        convert_onnx_to_tf = False
+        if tf_onnx and convert_onnx_to_tf:
+            onnx_model = onnx.load(ONNX_PATH)
+            # prepare tf representation
+            tf_exp = onnx_tf.backend.prepare(onnx_model)
+            # export the model
+            tf_exp.export_graph(ONNX_TF_PB_PATH)
 
         onnx_pb_graph = tf.Graph()
         with onnx_pb_graph.as_default():
@@ -90,14 +94,21 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
             onnx_pb_graph_def.ParseFromString(serialized_graph)
             tf.import_graph_def(onnx_pb_graph_def, name='')
 
-            with tf.Session() as sess:
+            config = tf.ConfigProto()
+            config.gpu_options.allow_growth = True
+            if use_jit:
+                # config.gpu_options.per_process_gpu_memory_fraction = 0.5
+                config.log_device_placement = False
+                config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+
+            with tf.Session(config=config) as sess:
                 # INFERENCE using session.run
                 model = QA(MODEL_PATH, use_jit=use_jit, fp16=fp16, onnx=onnx_runtime, sess=sess, vsl=vsl, tf_onnx=tf_onnx)
 
                 print('-- BENCHMARKING: JIT={} | FP16={} | ONNX_RUNTIME={} | '
                       'TF_ONNX_VERSION={} | TF_VERSION={} | EXACT_VSL={} --'
                       .format(use_jit, fp16, onnx_runtime, tf_onnx, tf_version, vsl))
-                for passage_batch in range(max_batch):
+                for passage_batch in range(min_batch, max_batch):
                     passage_batch = pow(3, passage_batch-1)
                     if passage_batch < 1:
                         passages = [document1]
@@ -108,6 +119,8 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
                             passages.append(document2)
                             passages.append(document3)
 
+                    if max_batch > 2:
+                        num_predicts = 50
                     time_taken, rps = measure_inference(model, passages, question, num_predicts)
                     # print('Time taken for test: {} s'.format(time_taken))
                     print('RPS: {}'.format(rps))
@@ -122,7 +135,7 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
             print('-- BENCHMARKING: JIT={} | FP16={} | ONNX_RUNTIME={} | '
                   'TF_ONNX_VERSION={} | TF_VERSION={} | EXACT_VSL={} --'
                   .format(use_jit, fp16, onnx_runtime, tf_onnx, tf_version, vsl))
-            for passage_batch in range(max_batch):
+            for passage_batch in range(min_batch, max_batch):
                 passage_batch = pow(3, passage_batch-1)
                 if passage_batch < 1:
                     passages = [document1]
@@ -133,6 +146,8 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
                         passages.append(document2)
                         passages.append(document3)
 
+                if max_batch > 2:
+                    num_predicts = 50
                 time_taken, rps = measure_inference(model, passages, question, num_predicts)
                 # print('Time taken for test: {} s'.format(time_taken))
                 print('RPS: {}'.format(rps))
@@ -141,12 +156,18 @@ def test(use_jit=False, fp16=False, onnx_runtime=False, export_onnx=False, tf_on
 
 
 def measure_inference(model, passages, question, num_predicts):
+    import random
     print('Num passages: {}'.format(len(passages)))
+    answer = model.predict(passages, question)
+    answer = model.predict(passages, question)
+    print('Sanity check for prediction: {}'.format([a_i['answer'] for a_i in answer]))
+    noise = " lala"
     start_time = time.time()
     for i in range(num_predicts):
+        # input = [p + random.randint(0, 20) * noise for p in passages]
+        # passages = [p + " some random text" for p in passages]
         answer = model.predict(passages, question)
-        if i == 0:
-            print('Sanity check for prediction: {}'.format([a_i['answer'] for a_i in answer]))
+        # torch.cuda.empty_cache()
     end_time = time.time()
     time_taken = (end_time - start_time)
     rps = num_predicts / time_taken

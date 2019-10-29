@@ -36,7 +36,8 @@ class OptimizedModel:
                  'weight_decay': 0.0}
             ]
             optimizer = AdamW(optimizer_grouped_parameters, lr=0., eps=0.)
-            self.model, optimizer = amp.initialize(self.model, optimizer, opt_level='O2')
+            with torch.no_grad():
+                self.model, optimizer = amp.initialize(self.model, optimizer, opt_level='O2')
             # self.model = torch.quantization.quantize_dynamic(self.model, dtype=torch.float16)
             # self.model = self.model.half()
         if use_jit:

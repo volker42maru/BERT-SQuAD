@@ -196,8 +196,10 @@ def squad_examples_to_features(examples, tokenizer, max_seq_length,
         orig_to_tok_index_batch.append(orig_to_tok_index)
         all_doc_tokens_batch.append(all_doc_tokens)
 
-    if vsl:
+    if vsl != 'none':
         max_seq_length = min(max(min_tokens_for_doc_batch), max_seq_length)
+        if vsl == 'rounded':
+            max_seq_length = math.ceil(max_seq_length / 128) * 128
 
     for (example_index, example) in enumerate(examples):
         query_tokens = query_tokens_batch[example_index]
